@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Applicate - Gestor de Tareas Smart</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Font Google -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- SortableJS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
+    
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        
+        /* Custom Scrollbar */
+        .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scroll::-webkit-scrollbar-track { background: transparent; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        .custom-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        /* Kanban Transitions */
+        .kanban-col { transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.3s ease; will-change: width; }
+        .col-compact .col-content { opacity: 0; pointer-events: none; transform: scale(0.95); transition: opacity 0.2s ease, transform 0.2s ease; }
+        .col-expanded .col-content { opacity: 1; transform: scale(1); transition: opacity 0.4s ease 0.1s, transform 0.4s ease 0.1s; }
+        .col-compact .col-header-full { display: none; }
+        .col-compact { width: 56px !important; cursor: pointer; position: relative; overflow: hidden; }
+        .col-compact:hover { filter: brightness(0.95); }
+        .col-compact .vertical-text { writing-mode: vertical-rl; text-orientation: mixed; transform: rotate(180deg); white-space: nowrap; font-weight: 600; letter-spacing: 0.5px; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(180deg); }
+
+        /* AI & Gradients */
+        .bg-login-gradient { background: linear-gradient(135deg, #1e3a8a 0%, #7c3aed 50%, #f59e0b 100%); }
+        .ai-gradient-btn { background: linear-gradient(90deg, #6366f1, #a855f7, #ec4899); background-size: 200% auto; transition: 0.5s; }
+        .ai-gradient-btn:hover { background-position: right center; }
+        .fade-in { animation: fadeIn 0.2s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: scale(1); } }
+
+        /* Chat Widget Animations */
+        .typing-dot { animation: typing 1.4s infinite ease-in-out both; }
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes typing { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+    </style>
+</head>
+<body class="bg-[#F0F4F8] text-slate-800 h-screen flex flex-col overflow-hidden selection:bg-blue-100">
+
+    <!-- APP CONTAINER -->
+    <div id="app" class="h-full w-full flex flex-col relative"></div>
+
+    <!-- MODALS CONTAINER -->
+    <div id="modal-container" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm transition-opacity fade-in"></div>
+
+    <script>
+        // --- CONFIG ---
+        const API_KEY = "AIzaSyDmxjCaz6GJ_VAcMH2QH91Ce8yCgnjW1zU"; // ⚠️ INSERTA TU API KEY DE GEMINI AQUÍ
+
+        // --- DATA ---
+        const defaultGroups = [];
+
+        let state = {
+            user: null, 
+            view: 'login', 
+            lastView: 'board', 
+            tasks: [], 
+            groups: [],
+            compactMode: false, 
+            compactedGroups: [], 
+            currentDate: new Date(), 
+            calendarView: 'month', 
+            selectedTask: null,
+            
+            // UI State
+            isDropdownOpen: false, 
+            isDateFilterOpen: false, 
+            isMiniPickerOpen: false,
+            isAIChatOpen: false, 
+            filterStartDate: null, 
+            filterEndDate: null,
+            
+            // AI State
+            aiChatHistory: [{ role: 'ai', message: 'Hola, soy tu Copiloto. Puedo crear, editar, mover o borrar tareas. ¿En qué te ayudo hoy?' }]
+        };
+
+        // --- INIT ---
+        function init() {
+            loadData();
+            render();
+            
+            document.addEventListener('click', (e) => {
+                closeIfOutside(e, 'user-dropdown', 'user-menu-btn', () => state.isDropdownOpen = false);
+                closeIfOutside(e, 'date-filter-popover', 'date-filter-btn', () => state.isDateFilterOpen = false);
+                closeIfOutside(e, 'mini-date-picker', 'calendar-title-btn', () => state.isMiniPickerOpen = false);
+            });
+        }
+
+        function closeIfOutside(e, contentId, triggerId, callback) {
+            const content = document.getElementById(contentId);
+            const trigger = document.getElementById(triggerId);
+            if (content && trigger && !content.classList.contains('hidden')) {
+                if (!content.contains(e.target) && !trigger.contains(e.target)) {
+                    callback();
+                    render();
+                }
+            }
+        }
+
+        function saveData() { localStorage.setItem('applicate_copilot_v5', JSON.stringify(state)); }
+        function loadData() {
+            const stored = localStorage.getItem('applicate_copilot_v5');
+            if (stored) {
+                const parsed = JSON.parse(stored);
+                if(parsed.tasks) parsed.tasks.forEach(t => t.date = new Date(t.date));
+                parsed.currentDate = new Date();
+                parsed.isDropdownOpen = false; 
+                parsed.isDateFilterOpen = false; 
+                parsed.isMiniPickerOpen = false;
+                if(!parsed.aiChatHistory) parsed.aiChatHistory = [{ role: 'ai', message: 'Hola, soy tu Copiloto...' }];
+                state = parsed;
+            }
+        }
+        function resetData() { if(confirm("¿Resetear todo?")) { localStorage.removeItem('applicate_copilot_v5'); location.reload(); } }
+
+        // --- RENDER ---
+        function render() {
+            const app = document.getElementById('app');
+            app.innerHTML = ''; 
+
+            if (!state.user) {
+                app.className = "h-full w-full flex items-center justify-center bg-login-gradient";
+                renderLogin(app);
+            } else {
+                app.className = "h-full w-full flex flex-col bg-[#DCE4F0]";
+                renderHeader(app);
+                const main = document.createElement('main');
+                main.className = "flex-1 overflow-hidden relative flex flex-col";
+                app.appendChild(main);
+                
+                if (state.view === 'board') renderBoard(main);
+                else if (state.view === 'calendar') renderCalendar(main);
+                else if (state.view === 'reports') renderReports(main);
+                else if (state.view === 'task-detail') renderTaskDetail(main);
+
+                renderAIChatWidget(app);
+            }
+            lucide.createIcons();
+        }
+
+        // 1. LOGIN
+        function renderLogin(container) {
+            container.innerHTML = `
+                <div class="bg-white/20 backdrop-blur-xl p-10 rounded-3xl shadow-2xl w-96 border border-white/40 fade-in">
+                    <div class="text-center mb-8"><h1 class="text-5xl font-bold text-white mb-2 tracking-tight">App<span class="font-light opacity-90">licate</span></h1><div class="w-24 h-24 bg-blue-600 rounded-full mx-auto flex items-center justify-center border-4 border-white/30 mt-6 shadow-lg"><i data-lucide="user" class="w-12 h-12 text-white"></i></div></div>
+                    <form onsubmit="handleLogin(event)" class="space-y-5">
+                        <div><label class="block text-white/90 text-sm font-semibold mb-2 pl-1">Usuario</label><input type="text" id="login-user" class="w-full px-5 py-3 rounded-xl bg-white/90 border-0 text-slate-800 font-medium placeholder-slate-400 focus:ring-4 focus:ring-blue-400/50 outline-none" placeholder="admin" required></div>
+                        <div><label class="block text-white/90 text-sm font-semibold mb-2 pl-1">Contraseña</label><div class="relative"><input type="password" id="login-pass" class="w-full px-5 py-3 rounded-xl bg-white/90 border-0 text-slate-800 font-medium placeholder-slate-400 focus:ring-4 focus:ring-blue-400/50 outline-none" placeholder="admin123" required></div></div>
+                        <button class="w-full bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 text-white font-bold py-3.5 rounded-xl shadow-lg mt-2">Iniciar sesión</button>
+                    </form>
+                </div>`;
+        }
+
+        // 2. HEADER
+        function renderHeader(container) {
+            const header = document.createElement('header');
+            header.className = "bg-[#051338] text-white h-16 flex items-center justify-between px-6 shadow-md flex-shrink-0 z-30";
+            header.innerHTML = `
+                <div class="flex items-center space-x-8">
+                    <div class="text-2xl font-bold text-blue-400 cursor-pointer hover:opacity-90" onclick="setView('board')">App<span class="text-white font-light">licate</span></div>
+                    <nav class="flex space-x-6 text-sm font-semibold tracking-wide hidden md:flex">
+                        ${['calendar','board','reports'].map(v => 
+                            `<button onclick="setView('${v}')" class="${state.view===v ? 'text-white' : 'text-slate-400 hover:text-white'} transition flex flex-col items-center group">
+                                <span class="capitalize">${v==='board'?'Pendientes':v==='calendar'?'Calendario':'Reportes'}</span>
+                                <span class="h-0.5 w-full ${state.view===v ? 'bg-orange-500' : 'bg-transparent group-hover:bg-white/30'} mt-1 rounded-full"></span>
+                            </button>`
+                        ).join('')}
+                    </nav>
+                </div>
+                <div class="flex items-center space-x-5">
+                    <div class="relative">
+                        <button id="user-menu-btn" onclick="toggleState('isDropdownOpen', event)" class="flex items-center space-x-3 focus:outline-none hover:bg-white/5 py-1 px-2 rounded-lg transition">
+                            <div class="w-9 h-9 bg-gradient-to-br from-blue-400 to-blue-600 rounded-full flex items-center justify-center text-sm font-bold text-white shadow-inner border border-white/10">${state.user.name.charAt(0).toUpperCase()}</div>
+                            <span class="text-sm font-medium hidden md:block text-slate-200">${state.user.name}</span>
+                            <i data-lucide="chevron-down" class="w-4 h-4 text-slate-400 transition-transform ${state.isDropdownOpen ? 'rotate-180' : ''}"></i>
+                        </button>
+                        <div id="user-dropdown" class="absolute right-0 mt-2 w-56 bg-white text-slate-700 rounded-xl shadow-2xl py-2 ${state.isDropdownOpen ? 'block' : 'hidden'} z-50 animate-in fade-in slide-in-from-top-2">
+                            <div class="px-4 py-2 text-xs font-bold text-slate-400 uppercase">Cuenta</div>
+                            <a href="#" onclick="editUserName()" class="flex items-center px-4 py-2.5 hover:bg-slate-50 text-sm"><i data-lucide="edit-2" class="w-4 h-4 mr-2"></i> Editar nombre</a>
+                            <div class="border-t border-slate-100 my-1"></div>
+                            <a href="#" onclick="resetData()" class="flex items-center px-4 py-2.5 hover:bg-red-50 text-red-600 text-sm"><i data-lucide="refresh-cw" class="w-4 h-4 mr-2"></i> Resetear</a>
+                            <a href="#" onclick="handleLogout()" class="flex items-center px-4 py-2.5 hover:bg-slate-50 text-sm"><i data-lucide="log-out" class="w-4 h-4 mr-2"></i> Salir</a>
+                        </div>
+                    </div>
+                </div>`;
+            container.appendChild(header);
+        }
+
+        // 3. BOARD
+        function renderBoard(container) {
+            // Ghost Tasks Recovery
+            if (state.groups.length > 0) {
+                const validGroupIds = state.groups.map(g => g.id);
+                state.tasks.forEach(t => {
+                    if (!validGroupIds.includes(t.groupId)) {
+                        console.warn(`Tarea recuperada: ${t.name}`);
+                        t.groupId = state.groups[0].id;
+                    }
+                });
+            } else if (state.tasks.length > 0) {
+                const defId = 'g-def';
+                state.groups.push({ id: defId, name: 'General', color: 'bg-blue-400' });
+                state.tasks.forEach(t => t.groupId = defId);
+            }
+
+            let filtered = state.tasks.filter(t => t.status !== 'completed');
+            let filterText = "Rango de fecha";
+            let isFilterActive = false;
+
+            if (state.filterStartDate && state.filterEndDate) {
+                const s = new Date(state.filterStartDate), e = new Date(state.filterEndDate); e.setHours(23,59,59);
+                filtered = filtered.filter(t => { const d=new Date(t.date); return d>=s && d<=e; });
+                filterText = `${s.toLocaleDateString()} - ${e.toLocaleDateString()}`; isFilterActive = true;
+            }
+
+            container.innerHTML = `
+                <div class="flex flex-col h-full p-6">
+                    <div class="flex justify-between items-center mb-6">
+                        <div class="flex items-center space-x-4">
+                            <div class="relative">
+                                <button id="date-filter-btn" onclick="toggleState('isDateFilterOpen', event)" class="bg-white rounded-lg shadow-sm border border-slate-200 px-4 py-2 flex items-center space-x-3 hover:bg-slate-50 transition ${isFilterActive?'ring-2 ring-blue-400 border-transparent':''}">
+                                    <span class="text-sm font-medium ${isFilterActive?'text-blue-600':'text-slate-600'}">${filterText}</span>
+                                    <i data-lucide="calendar" class="w-4 h-4 ${isFilterActive?'text-blue-600':'text-slate-400'}"></i>
+                                </button>
+                                <div id="date-filter-popover" class="absolute top-full left-0 mt-2 w-72 bg-white rounded-xl shadow-2xl border border-slate-100 p-4 z-40 ${state.isDateFilterOpen?'block':'hidden'} fade-in">
+                                    <div class="space-y-3">
+                                        <div><label class="text-xs font-bold text-slate-500 uppercase">Desde</label><input type="date" id="filter-start" class="w-full border rounded px-2 py-1 text-sm" value="${state.filterStartDate||''}"></div>
+                                        <div><label class="text-xs font-bold text-slate-500 uppercase">Hasta</label><input type="date" id="filter-end" class="w-full border rounded px-2 py-1 text-sm" value="${state.filterEndDate||''}"></div>
+                                        <div class="flex space-x-2 pt-2"><button onclick="applyDateFilter()" class="flex-1 bg-blue-600 text-white text-sm font-bold py-1 rounded">Aplicar</button><button onclick="clearDateFilter()" class="px-3 bg-slate-100 text-slate-600 text-sm font-bold py-1 rounded">Limpiar</button></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="flex items-center space-x-3">
+                            <button onclick="toggleGlobalCompact()" class="bg-slate-500 text-white w-10 h-10 rounded-lg flex items-center justify-center"><i data-lucide="${state.compactMode?'maximize-2':'minimize-2'}" class="w-5 h-5"></i></button>
+                            <button onclick="openModal('create')" class="bg-orange-500 hover:bg-orange-600 text-white px-6 py-2 rounded-lg shadow-md font-bold text-sm">Crear tarea</button>
+                        </div>
+                    </div>
+                    <div class="flex-1 overflow-x-auto overflow-y-hidden custom-scroll pb-4">
+                        <div class="flex h-full space-x-5 px-2 min-w-max" id="board-columns">
+                             ${state.groups.length===0 ? '<div class="w-full h-full flex flex-col items-center justify-center text-slate-400 italic"><i data-lucide="layout" class="w-12 h-12 mb-2 opacity-50"></i><p>No hay grupos. Usa el Copilot para crear tu flujo.</p></div>' : ''}
+                        </div>
+                    </div>
+                </div>`;
+
+            const board = document.getElementById('board-columns');
+            state.groups.forEach(g => {
+                const isCompact = state.compactMode || state.compactedGroups.includes(g.id);
+                const tList = filtered.filter(t => t.groupId === g.id);
+                const col = document.createElement('div');
+                col.className = `kanban-col flex-shrink-0 flex flex-col h-full rounded-xl ${isCompact ? 'col-compact' : 'col-expanded w-[380px]'}`;
+                if (isCompact) col.onclick = (e) => toggleGroupCompact(g.id);
+
+                if(isCompact) {
+                     col.style.backgroundColor = g.color.match(/bg-\[(#[0-9A-F]{6})\]/i)?.[1] || '#cbd5e1';
+                     col.innerHTML = `<div class="h-full flex items-center justify-center relative"><span class="vertical-text text-white text-lg tracking-widest">${g.name.toUpperCase()}</span><span class="absolute bottom-4 text-white font-bold text-sm bg-black/20 w-6 h-6 rounded-full flex items-center justify-center">${tList.length}</span></div>`;
+                } else {
+                    col.innerHTML = `
+                        <div onclick="toggleGroupCompact('${g.id}')" class="col-header-full flex-shrink-0 mb-3 h-14 ${g.color} rounded-lg flex justify-between items-center px-4 text-white shadow-md cursor-pointer hover:brightness-95 transition select-none">
+                            <h3 class="font-bold text-lg tracking-wide">${g.name}</h3><span class="text-xs font-bold bg-white/20 px-2 py-0.5 rounded-full">${tList.length}</span>
+                        </div>
+                        <div class="col-content flex-1 bg-[#E9EFF6] rounded-lg p-3 overflow-y-auto custom-scroll border border-slate-200/60 shadow-inner flex flex-col gap-4 sortable-lane pb-10" data-group-id="${g.id}">
+                            ${tList.map(t => `
+                                <div onclick="openTaskDetail('${t.id}')" class="bg-white p-5 rounded-lg shadow-sm hover:shadow-md cursor-pointer border border-slate-100 group relative overflow-hidden transition transform hover:-translate-y-0.5" data-task-id="${t.id}">
+                                    <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-orange-400"></div>
+                                    <h4 class="font-bold text-slate-800 text-lg mb-2 leading-snug">${t.name}</h4>
+                                    <p class="text-sm text-slate-600 line-clamp-3 mb-3 leading-relaxed">${t.description||'...'}</p>
+                                    <div class="flex justify-between items-center border-t border-slate-50 pt-3 text-xs text-slate-400 font-medium">
+                                        <span class="bg-slate-100 px-2 py-1 rounded text-slate-600">${new Date(t.date).toLocaleDateString()}</span>
+                                        <i data-lucide="${t.type==='Llamada'?'phone':t.type==='Reunión'?'users':t.type==='Correo'?'mail':'check-square'}" class="w-4 h-4 text-slate-400"></i>
+                                    </div>
+                                </div>`).join('')}
+                        </div>`;
+                }
+                board.appendChild(col);
+            });
+
+            document.querySelectorAll('.sortable-lane').forEach(l => {
+                new Sortable(l, { group: 'kanban', animation: 150, ghostClass: 'bg-blue-100', onEnd: (evt) => {
+                    const tId = evt.item.getAttribute('data-task-id'), gId = evt.to.getAttribute('data-group-id');
+                    const t = state.tasks.find(x => x.id === tId); 
+                    if(t && gId) { 
+                        t.groupId = gId; 
+                        saveData(); 
+                    }
+                }});
+            });
+        }
+
+        // 4. CALENDARIO
+        function renderCalendar(container) {
+            container.innerHTML = `
+                <div class="flex flex-col h-full bg-white">
+                    <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white shadow-sm z-10">
+                        <div class="flex items-center space-x-4 relative">
+                            <div class="relative">
+                                <button id="calendar-title-btn" onclick="toggleState('isMiniPickerOpen', event)" class="text-2xl font-bold text-slate-800 capitalize tracking-tight flex items-center hover:text-blue-600 transition">
+                                    ${state.currentDate.toLocaleString('es-ES', { month: 'long', year: 'numeric' })} <i data-lucide="chevron-down" class="w-5 h-5 ml-2 text-slate-400"></i>
+                                </button>
+                                <div id="mini-date-picker" class="absolute top-full left-0 mt-2 bg-white rounded-xl shadow-xl border border-slate-100 p-4 w-64 z-50 ${state.isMiniPickerOpen ? 'block' : 'hidden'} fade-in">
+                                    <div class="flex justify-between items-center mb-3">
+                                        <button onclick="changePickerYear(-1, event)" class="p-1 hover:bg-slate-100 rounded"><i data-lucide="chevron-left" class="w-4 h-4"></i></button>
+                                        <span id="picker-year" class="font-bold text-slate-700">${state.currentDate.getFullYear()}</span>
+                                        <button onclick="changePickerYear(1, event)" class="p-1 hover:bg-slate-100 rounded"><i data-lucide="chevron-right" class="w-4 h-4"></i></button>
+                                    </div>
+                                    <div class="grid grid-cols-3 gap-2">
+                                        ${Array.from({length:12}, (_, i) => `<button onclick="selectPickerMonth(${i}, event)" class="text-xs py-2 rounded hover:bg-blue-50 hover:text-blue-600 ${state.currentDate.getMonth()===i ? 'bg-blue-100 text-blue-700 font-bold' : 'text-slate-600'}">${new Date(0,i).toLocaleString('es-ES',{month:'short'})}</button>`).join('')}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="flex bg-slate-100 p-1 rounded-lg">
+                            ${['day','week','month'].map(v => `<button onclick="setCalendarView('${v}')" class="px-4 py-1.5 rounded-md text-sm font-medium transition ${state.calendarView===v?'bg-white text-blue-600 shadow-sm':'text-slate-500 hover:text-slate-700'}">${v==='day'?'Día':v==='week'?'Semana':'Mes'}</button>`).join('')}
+                        </div>
+                        <div class="flex items-center space-x-3 w-64 justify-end">
+                            <div class="flex bg-slate-100 rounded-md p-0.5"><button onclick="changeDate(-1)" class="p-2 hover:bg-white rounded"><i data-lucide="chevron-left" class="w-5 h-5 text-slate-600"></i></button><div class="w-px bg-slate-200 my-1"></div><button onclick="changeDate(1)" class="p-2 hover:bg-white rounded"><i data-lucide="chevron-right" class="w-5 h-5 text-slate-600"></i></button></div>
+                            <button onclick="openModal('create')" class="bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-md">Crear</button>
+                        </div>
+                    </div>
+                    <div class="flex-1 overflow-hidden flex flex-col bg-white relative">${getCalendarGridHTML()}</div>
+                </div>`;
+        }
+
+        function getCalendarGridHTML() {
+            const Y = state.currentDate.getFullYear(), M = state.currentDate.getMonth();
+            const today = new Date();
+            if (state.calendarView === 'month') {
+                const first = new Date(Y, M, 1).getDay() || 7, days = new Date(Y, M + 1, 0).getDate();
+                let html = `<div class="grid grid-cols-7 bg-[#F8FAFC] border-b h-10">${['L','M','X','J','V','S','D'].map(d=>`<div class="flex items-center justify-center font-bold text-slate-400 text-xs">${d}</div>`).join('')}</div><div class="grid grid-cols-7 flex-1 auto-rows-fr overflow-y-auto custom-scroll">`;
+                for(let i=1; i<first; i++) html+=`<div class="border-b border-r bg-slate-50/30"></div>`;
+                for(let d=1; d<=days; d++) {
+                    const dateStr = `${Y}-${String(M+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+                    const isToday = today.toDateString() === new Date(dateStr).toDateString();
+                    // FIX: Mostrar todas las tareas
+                    const ts = state.tasks.filter(t => t.date.toISOString().split('T')[0] === dateStr);
+                    
+                    html += `<div class="border-b border-r p-2 hover:bg-slate-50 min-h-[100px]"><span class="text-sm font-medium ${isToday?'bg-blue-600 text-white w-7 h-7 rounded-full flex items-center justify-center shadow':''} block mb-1">${d}</span>
+                    <div class="space-y-1 max-h-20 overflow-y-auto custom-scroll">
+                        ${ts.map(t=>`
+                            <div onclick="openTaskDetail('${t.id}')" class="text-[10px] bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-100 truncate cursor-pointer hover:bg-blue-100 ${t.status==='completed' ? 'opacity-50 line-through grayscale' : ''}">
+                                ${t.name}
+                            </div>
+                        `).join('')}
+                    </div></div>`;
+                }
+                return html + '</div>';
+            } else {
+                const isWeek = state.calendarView==='week';
+                const start = new Date(state.currentDate);
+                if(isWeek) { const d = start.getDay()||7; start.setDate(start.getDate()-d+1); }
+                const headers = isWeek ? Array.from({length:7},(_,i)=>{const d=new Date(start);d.setDate(start.getDate()+i);return d}) : [state.currentDate];
+                let html = `<div class="flex flex-col h-full"><div class="grid ${isWeek?'grid-cols-8':'grid-cols-[60px_1fr]'} bg-[#F8FAFC] border-b flex-shrink-0"><div class="p-2 text-xs text-center text-slate-400 font-bold border-r self-center">GMT</div>${headers.map(d=>`<div class="py-2 text-center border-r ${d.toDateString()===today.toDateString()?'bg-blue-50':''}"><div class="text-xs uppercase font-bold text-slate-500">${d.toLocaleDateString('es-ES',{weekday:'short'})}</div><div class="text-xl font-bold ${d.toDateString()===today.toDateString()?'text-blue-600':''}">${d.getDate()}</div></div>`).join('')}</div><div class="flex-1 overflow-y-auto custom-scroll relative"><div class="absolute w-full">`;
+                for(let h=7;h<=20;h++){
+                    html += `<div class="grid ${isWeek?'grid-cols-8':'grid-cols-[60px_1fr]'} min-h-[60px] border-b"><div class="text-[10px] text-slate-400 text-right pr-2 pt-1 sticky left-0 bg-white">${h}:00</div>${headers.map(d=>{
+                        const dateStr = d.toISOString().split('T')[0];
+                        const ts = state.tasks.filter(t => t.date.toISOString().split('T')[0]===dateStr);
+                        return `<div class="border-l p-1 hover:bg-slate-50">${h===9?ts.map(t=>`
+                            <div onclick="openTaskDetail('${t.id}')" class="text-[10px] bg-orange-100 text-orange-800 p-1 rounded mb-1 cursor-pointer border-l-2 border-orange-500 truncate ${t.status==='completed' ? 'opacity-50 line-through grayscale' : ''}">${t.name}</div>
+                        `).join(''):''}</div>`
+                    }).join('')}</div>`;
+                }
+                return html + '</div></div></div>';
+            }
+        }
+
+        // 5. REPORTES
+        function renderReports(container) {
+            const counts = { 'Reunión': 0, 'Llamada': 0, 'Tarea': 0, 'Correo': 0 };
+            let filtered = state.tasks;
+            if(state.filterStartDate && state.filterEndDate) {
+                const s=new Date(state.filterStartDate), e=new Date(state.filterEndDate); e.setHours(23,59,59);
+                filtered = state.tasks.filter(t => {const d=new Date(t.date); return d>=s && d<=e;});
+            }
+            filtered.forEach(t => counts[t.type] ? counts[t.type]++ : counts['Tarea']++);
+
+            container.innerHTML = `
+                <div class="h-full flex flex-col bg-[#E9EFF6] p-8 overflow-y-auto custom-scroll">
+                    <div class="max-w-5xl mx-auto w-full space-y-6">
+                        <div class="flex justify-between items-center">
+                            <h2 class="text-2xl font-bold text-slate-800">Reportes <span class="text-sm font-normal text-slate-500 ml-2">${state.user.name}</span></h2>
+                            <div class="flex space-x-3">
+                                <button onclick="analyzeReportsWithAI()" class="ai-gradient-btn text-white px-4 py-2 rounded-lg text-sm font-bold shadow-md flex items-center"><i data-lucide="brain-circuit" class="w-4 h-4 mr-2"></i> Analizar Productividad</button>
+                                <button id="date-filter-btn" onclick="toggleState('isDateFilterOpen', event)" class="bg-white border text-slate-600 px-4 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center"><i data-lucide="calendar" class="w-4 h-4 mr-2"></i> Filtrar</button>
+                            </div>
+                        </div>
+                        <div id="ai-analysis-result" class="hidden bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-100 rounded-xl p-6 animate-in fade-in">
+                            <h4 class="text-indigo-800 font-bold mb-2 flex items-center"><i data-lucide="sparkles" class="w-4 h-4 mr-2"></i> Coach de Productividad</h4>
+                            <p id="ai-analysis-text" class="text-slate-700 text-sm leading-relaxed"></p>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div class="bg-white rounded-xl shadow-sm p-6 border border-slate-200 md:col-span-1">
+                                <h3 class="font-bold text-slate-700 mb-4">Distribución</h3>
+                                <div class="h-48 relative"><canvas id="activityChart"></canvas></div>
+                            </div>
+                            <div class="bg-white rounded-xl shadow-sm p-6 border border-slate-200 md:col-span-2">
+                                <h3 class="font-bold text-slate-700 mb-4">Detalle de Interacciones</h3>
+                                <div class="overflow-auto max-h-48 custom-scroll">
+                                    <table class="w-full text-sm text-left">
+                                        <thead class="text-xs text-slate-500 uppercase bg-slate-50 sticky top-0"><tr><th class="px-4 py-2">Tarea</th><th class="px-4 py-2">Tipo</th><th class="px-4 py-2">Estado</th></tr></thead>
+                                        <tbody class="divide-y divide-slate-100">${filtered.map(t=>`<tr><td class="px-4 py-2 truncate max-w-[200px]">${t.name}</td><td class="px-4 py-2"><span class="bg-blue-50 text-blue-600 px-2 py-0.5 rounded text-xs">${t.type}</span></td><td class="px-4 py-2"><span class="${t.status==='completed'?'text-green-600':'text-orange-600'} text-xs font-bold">${t.status}</span></td></tr>`).join('')}</tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>`;
+            setTimeout(() => {
+                const ctx = document.getElementById('activityChart');
+                if(ctx) new Chart(ctx, { type: 'doughnut', data: { labels: Object.keys(counts), datasets: [{ data: Object.values(counts), backgroundColor: ['#F87171', '#4ADE80', '#60A5FA', '#A78BFA'] }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } } } } });
+            }, 50);
+        }
+
+        // 6. COPILOT IA WIDGET
+        function renderAIChatWidget(container) {
+            const widget = document.createElement('div');
+            widget.id = 'ai-chat-widget';
+            widget.className = `fixed bottom-6 right-6 z-50 flex flex-col items-end ${state.isAIChatOpen ? '' : ''}`;
+            
+            widget.innerHTML = `
+                <div id="chat-window" class="${state.isAIChatOpen ? 'block' : 'hidden'} bg-white w-80 md:w-96 h-[500px] rounded-2xl shadow-2xl border border-slate-200 mb-4 flex flex-col overflow-hidden animate-in fade-in slide-in-from-bottom-10">
+                    <div class="bg-gradient-to-r from-indigo-600 to-purple-600 p-4 flex justify-between items-center text-white shrink-0">
+                        <div class="flex items-center gap-2"><i data-lucide="bot" class="w-5 h-5"></i><span class="font-bold">Copilot</span></div>
+                        <button onclick="toggleState('isAIChatOpen', event)" class="hover:bg-white/20 p-1 rounded"><i data-lucide="minus" class="w-4 h-4"></i></button>
+                    </div>
+                    <div id="chat-messages" class="flex-1 p-4 overflow-y-auto custom-scroll bg-slate-50 space-y-3">
+                        ${state.aiChatHistory.map(msg => `
+                            <div class="flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}">
+                                <div class="${msg.role === 'user' ? 'bg-blue-600 text-white rounded-br-none' : 'bg-white border border-slate-200 text-slate-700 rounded-bl-none'} p-3 rounded-xl text-sm max-w-[85%] shadow-sm">
+                                    ${msg.message}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                    <div class="p-3 bg-white border-t border-slate-200 flex gap-2 shrink-0">
+                        <input id="chat-input" type="text" class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Ej: Agendar reunión..." onkeypress="if(event.key==='Enter') sendToCopilot()">
+                        <button onclick="sendToCopilot()" class="bg-indigo-600 hover:bg-indigo-700 text-white p-2 rounded-lg transition"><i data-lucide="send" class="w-4 h-4"></i></button>
+                    </div>
+                </div>
+                <button id="ai-toggle-btn" onclick="toggleState('isAIChatOpen', event)" class="ai-gradient-btn w-14 h-14 rounded-full flex items-center justify-center text-white shadow-xl hover:scale-105 transition transform">
+                    <i data-lucide="${state.isAIChatOpen ? 'x' : 'sparkles'}" class="w-6 h-6"></i>
+                </button>
+            `;
+            container.appendChild(widget);
+            if(state.isAIChatOpen) scrollToBottomChat();
+        }
+
+        function scrollToBottomChat() {
+            const chat = document.getElementById('chat-messages');
+            if(chat) chat.scrollTop = chat.scrollHeight;
+        }
+
+        async function sendToCopilot() {
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if(!text) return;
+
+            state.aiChatHistory.push({ role: 'user', message: text });
+            saveData();
+            render(); 
+            
+            const chatContainer = document.getElementById('chat-messages');
+            chatContainer.innerHTML += `<div id="ai-thinking" class="flex justify-start"><div class="bg-white border border-slate-200 p-3 rounded-xl rounded-bl-none shadow-sm flex gap-1 items-center"><div class="w-2 h-2 bg-slate-400 rounded-full typing-dot"></div><div class="w-2 h-2 bg-slate-400 rounded-full typing-dot"></div><div class="w-2 h-2 bg-slate-400 rounded-full typing-dot"></div></div></div>`;
+            scrollToBottomChat();
+            input.value = '';
+
+            const contextTasks = JSON.stringify(state.tasks.map(t => ({ id: t.id, name: t.name, date: t.date, status: t.status })));
+            
+            // FIX 1: Prompt más agresivo en la lógica de agrupación
+            const prompt = `
+                Actúa como Copiloto. Tareas: ${contextTasks}. Fecha: ${new Date().toISOString()}. Usuario: "${text}".
+                
+                Reglas CRÍTICAS:
+                1. Analiza el contexto de CADA tarea por separado. Si el usuario menciona temas diferentes (ej: Universidad, Personal, Chamba), DEBES asignar distintos groupId a cada tarea.
+                2. Usa 'NEW:NombreGrupo' para cada categoría distinta que no exista. NO reutilices el ID del primer grupo para todas las tareas si pertenecen a contextos diferentes.
+                3. Si no se especifica duración, asume '1h'. Si no hay tipo claro, usa 'Tarea'.
+                4. JSON EXACTO: { "action": "create|update|delete|chat", "message": "Resp corta", "data": ... }
+                
+                Data:
+                create: { tasks: [{ name, date, duration, type, description, groupId: 'ID'|'NEW:Nombre', notes: [{text: '...', date: '...'}] }] }
+                delete: { taskIds: ["id"] }
+                update: { tasks: [{ id, updates: { date, status, groupId, notes } }] }
+                Nunca devuelvas nulls.
+            `;
+
+            try {
+                let responseData;
+                if (API_KEY) {
+                    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+                    });
+                    const data = await res.json();
+                    const raw = data.candidates[0].content.parts[0].text.replace(/```json/g,'').replace(/```/g,'').trim();
+                    responseData = JSON.parse(raw);
+                } else {
+                    await new Promise(r => setTimeout(r, 1000));
+                    if (text.toLowerCase().includes('borra')) {
+                        const toDelete = state.tasks.length > 0 ? [state.tasks[state.tasks.length-1].id] : [];
+                        responseData = { action: 'delete', message: `He borrado ${toDelete.length} tarea(s).`, data: { taskIds: toDelete } };
+                    } else {
+                        responseData = { action: 'create', message: "Agendado.", data: { tasks: [{ name: "Tarea IA", date: new Date().toISOString(), duration: "1h", type: "Tarea", description: "Creada desde chat", groupId: state.groups[0]?.id || 'g-def' }] } };
+                    }
+                }
+                handleAIAction(responseData);
+                state.aiChatHistory.push({ role: 'ai', message: responseData.message });
+                saveData();
+                render();
+            } catch (e) {
+                state.aiChatHistory.push({ role: 'ai', message: "Error en la solicitud." });
+                saveData();
+                render();
+            }
+        }
+
+        function handleAIAction(response) {
+            const { action, data } = response;
+            if (action === 'create') {
+                data.tasks.forEach(t => {
+                    const duration = t.duration || '1h';
+                    const type = t.type || 'Tarea';
+                    let gid = t.groupId;
+                    if (gid && gid.startsWith('NEW:')) {
+                        const gName = gid.split(':')[1];
+                        const existing = state.groups.find(g => g.name.toLowerCase() === gName.toLowerCase());
+                        if (existing) gid = existing.id;
+                        else { const newId = 'g-'+Date.now()+Math.random(); state.groups.push({ id: newId, name: gName, color: 'bg-blue-400' }); gid = newId; }
+                    } else if (!state.groups.find(g=>g.id===gid)) {
+                        if(state.groups.length > 0) gid = state.groups[0].id;
+                        else { const nid='g-def'; state.groups.push({id:nid, name:'General', color:'bg-blue-400'}); gid=nid; }
+                    }
+                    const notes = t.notes && Array.isArray(t.notes) ? t.notes : [];
+                    state.tasks.push({ id: 't-'+Date.now()+Math.random(), status: 'pending', notes: notes, ...t, duration, type, groupId: gid, date: new Date(t.date) });
+                });
+            } else if (action === 'delete') {
+                state.tasks = state.tasks.filter(t => !data.taskIds.includes(t.id));
+            } else if (action === 'update') {
+                data.tasks.forEach(u => {
+                    const idx = state.tasks.findIndex(t => t.id === u.id);
+                    if (idx !== -1) {
+                        state.tasks[idx] = { ...state.tasks[idx], ...u.updates };
+                        if(u.updates.date) state.tasks[idx].date = new Date(u.updates.date);
+                        if(u.updates.notes && Array.isArray(u.updates.notes)) {
+                             state.tasks[idx].notes = [...u.updates.notes, ...(state.tasks[idx].notes || [])];
+                        }
+                    }
+                });
+            }
+        }
+
+        // FIX 4: Análisis Productividad Real
+        async function analyzeReportsWithAI() {
+            const btn = document.querySelector('button[onclick="analyzeReportsWithAI()"]');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Analizando...`;
+            
+            const total = state.tasks.length;
+            const completed = state.tasks.filter(t=>t.status==='completed').length;
+            const pending = total - completed;
+            
+            const prompt = `
+                Actúa como un Coach de Productividad.
+                Datos: ${total} tareas totales. ${completed} completadas, ${pending} pendientes.
+                Dame 3 consejos cortos y motivadores en formato HTML lista.
+            `;
+            
+            let advice = "<ul><li>Mantén el foco.</li><li>Cierra pendientes hoy.</li></ul>"; 
+            
+            if(API_KEY) {
+                try {
+                    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }) });
+                    const data = await res.json();
+                    advice = data.candidates[0].content.parts[0].text;
+                } catch(e) { console.error(e); }
+            }
+
+            document.getElementById('ai-analysis-result').classList.remove('hidden');
+            document.getElementById('ai-analysis-text').innerHTML = advice;
+            btn.innerHTML = originalText;
+            lucide.createIcons();
+        }
+
+        // 7. UTILS
+        function toggleState(key, e) { 
+            if(e) e.stopPropagation(); 
+            state[key] = !state[key]; 
+            render(); 
+        }
+        
+        function changePickerYear(d, e) {
+            if(e) e.stopPropagation();
+            state.currentDate.setFullYear(state.currentDate.getFullYear() + d); 
+            render(); 
+        }
+        
+        function selectPickerMonth(m, e) { 
+            if(e) e.stopPropagation();
+            state.currentDate.setMonth(m); 
+            state.currentDate.setDate(1); 
+            state.isMiniPickerOpen = false; 
+            render(); 
+        }
+
+        function jumpToDate(v) { if(v){ state.currentDate=new Date(v+'T12:00:00'); render(); } }
+        function setCalendarView(v) { state.calendarView=v; render(); }
+        function changeDate(o) { const d=new Date(state.currentDate); if(state.calendarView==='month') d.setMonth(d.getMonth()+o); else d.setDate(d.getDate()+(o*(state.calendarView==='week'?7:1))); state.currentDate=d; render(); }
+        function openTaskDetail(id) { state.lastView = state.view; state.selectedTask = state.tasks.find(t=>t.id===id); state.view='task-detail'; saveData(); render(); }
+        function renderTaskDetail(c) {
+            const t = state.selectedTask;
+            if(!t) return setView('board');
+            c.innerHTML = `
+                <div class="h-full bg-[#F1F5F9] flex flex-col">
+                    <div class="bg-white px-6 py-4 shadow-sm border-b flex justify-between items-center">
+                        <div class="flex items-center gap-4"><button onclick="setView('${state.lastView}')" class="p-2 hover:bg-slate-100 rounded-full"><i data-lucide="arrow-left" class="w-6 h-6 text-slate-600"></i></button><div><h2 class="text-xl font-bold text-slate-800">${t.name}</h2><span class="text-xs text-slate-500">${t.id}</span></div></div>
+                        <div class="flex gap-2"><button onclick="openModal('edit')" class="px-4 py-2 bg-white border rounded-lg text-sm font-medium shadow-sm hover:bg-slate-50">Editar</button><button onclick="toggleTaskComplete('${t.id}')" class="px-4 py-2 ${t.status==='completed'?'bg-slate-500':'bg-green-600'} text-white rounded-lg text-sm font-bold shadow-sm">${t.status==='completed'?'Reabrir':'Completar'}</button><button onclick="deleteTask('${t.id}')" class="p-2 text-red-600 hover:bg-red-50 rounded-lg"><i data-lucide="trash-2" class="w-5 h-5"></i></button></div>
+                    </div>
+                    <div class="p-8 max-w-5xl mx-auto w-full grid grid-cols-3 gap-6 overflow-y-auto custom-scroll">
+                        <div class="col-span-2 space-y-6">
+                            <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200"><h3 class="font-bold mb-4 flex items-center gap-2"><i data-lucide="file-text" class="w-5 h-5 text-blue-500"></i> Descripción</h3><p class="text-slate-600 text-sm">${t.description || 'Sin descripción'}</p></div>
+                            <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200"><h3 class="font-bold mb-4 flex items-center gap-2"><i data-lucide="sticky-note" class="w-5 h-5 text-amber-500"></i> Notas</h3><div class="flex gap-2 mb-4"><input id="note-in" class="flex-1 border rounded-lg px-3 py-2 text-sm" placeholder="Nueva nota..."><button onclick="addNote('${t.id}')" class="p-2 bg-blue-100 text-blue-600 rounded-lg"><i data-lucide="send" class="w-4 h-4"></i></button></div><div class="space-y-3">${t.notes?.map(n=>`<div class="bg-slate-50 p-3 rounded border text-sm text-slate-600"><p>${n.text}</p><span class="text-xs text-slate-400">${new Date(n.date).toLocaleString()}</span></div>`).join('')||''}</div></div>
+                        </div>
+                        <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 h-fit space-y-4">
+                            <h3 class="font-bold text-slate-400 text-xs uppercase">Detalles</h3>
+                            <div class="flex justify-between text-sm"><span class="text-slate-500">Fecha</span><span class="font-medium">${new Date(t.date).toLocaleDateString()}</span></div>
+                            <div class="flex justify-between text-sm"><span class="text-slate-500">Duración</span><span class="font-medium">${t.duration}</span></div>
+                            <div class="flex justify-between text-sm"><span class="text-slate-500">Tipo</span><span class="font-medium bg-blue-50 text-blue-600 px-2 rounded">${t.type}</span></div>
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        // FIX 1: Modal Restaurado y Completo
+        function openModal(type) { 
+            const m=document.getElementById('modal-container'); 
+            m.classList.remove('hidden'); 
+            const task = type === 'edit' ? state.selectedTask : {name:'', date: new Date(), duration:'', groupId:'', type:'Tarea', description:''};
+            
+            m.innerHTML=`
+            <div class="bg-white rounded-xl p-6 w-96 shadow-2xl fade-in relative">
+                <h3 class="font-bold text-lg mb-4">${type==='edit'?'Editar':'Nueva'} Tarea</h3>
+                <form onsubmit="submitTask(event,'${type}')" class="space-y-3">
+                    <div><label class="text-xs font-bold text-slate-500 uppercase">Nombre</label><input name="name" class="w-full border p-2 rounded" placeholder="Nombre" required value="${task.name}"></div>
+                    <div class="grid grid-cols-2 gap-2">
+                        <div><label class="text-xs font-bold text-slate-500 uppercase">Fecha</label><input type="date" name="date" class="w-full border p-2 rounded" required value="${task.date instanceof Date ? task.date.toISOString().split('T')[0] : ''}"></div>
+                        <div><label class="text-xs font-bold text-slate-500 uppercase">Duración</label><input name="dur" class="w-full border p-2 rounded" placeholder="1h" value="${task.duration}"></div>
+                    </div>
+                    <div><label class="text-xs font-bold text-slate-500 uppercase">Grupo</label><select name="gid" class="w-full border p-2 rounded">${state.groups.map(g=>`<option value="${g.id}" ${task.groupId===g.id?'selected':''}>${g.name}</option>`).join('')}</select></div>
+                    <div><label class="text-xs font-bold text-slate-500 uppercase">Tipo</label><select name="type" class="w-full border p-2 rounded"><option ${task.type==='Tarea'?'selected':''}>Tarea</option><option ${task.type==='Reunión'?'selected':''}>Reunión</option><option ${task.type==='Llamada'?'selected':''}>Llamada</option><option ${task.type==='Correo'?'selected':''}>Correo</option></select></div>
+                    <div><label class="text-xs font-bold text-slate-500 uppercase">Descripción</label><textarea name="description" class="w-full border p-2 rounded" rows="3">${task.description || ''}</textarea></div>
+                    <button class="w-full bg-blue-600 text-white font-bold py-2 rounded mt-2">Guardar</button>
+                </form>
+                <button onclick="document.getElementById('modal-container').classList.add('hidden')" class="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><i data-lucide="x"></i></button>
+            </div>`; 
+            lucide.createIcons(); 
+        }
+
+        function submitTask(e,t){ 
+            e.preventDefault(); 
+            const f=e.target; 
+            const d={
+                name:f.name.value,
+                date:new Date(f.date.value+'T12:00:00'),
+                duration:f.dur.value,
+                groupId:f.gid.value,
+                type:f.type.value, 
+                description:f.description.value 
+            }; 
+            if(t==='create') state.tasks.push({id:'t-'+Date.now(),status:'pending',notes:[],...d}); 
+            else Object.assign(state.selectedTask, d); 
+            saveData(); 
+            document.getElementById('modal-container').classList.add('hidden'); 
+            render(); 
+        }
+
+        function toggleTaskComplete(id){ const t=state.tasks.find(x=>x.id===id); if(t){t.status=t.status==='completed'?'pending':'completed';saveData();render();}}
+        function deleteTask(id){ if(confirm('¿Borrar?')){state.tasks=state.tasks.filter(x=>x.id!==id);state.selectedTask=null;state.view='board';saveData();render();}}
+        function addNote(id){ const i=document.getElementById('note-in'); if(i.value){ state.tasks.find(x=>x.id===id).notes.unshift({text:i.value,date:new Date().toISOString()}); saveData(); renderTaskDetail(document.querySelector('main')); }}
+        function setView(v){ state.view=v; state.selectedTask=null; saveData(); render(); }
+        function toggleGlobalCompact(){ state.compactMode=!state.compactMode; saveData(); render(); }
+        function toggleGroupCompact(id){ if(state.compactMode) {state.compactMode=false; state.compactedGroups=state.groups.map(g=>g.id).filter(x=>x!==id);} else { if(state.compactedGroups.includes(id)) state.compactedGroups=state.compactedGroups.filter(x=>x!==id); else state.compactedGroups.push(id); } saveData(); render(); }
+        function handleLogin(e){ e.preventDefault(); const u=document.getElementById('login-user').value, p=document.getElementById('login-pass').value; if(u==='admin'&&p==='admin123'){state.user={name:u};state.view='board';saveData();render();}else alert('Error'); }
+        function handleLogout(){ state.user=null;state.view='login';saveData();render(); }
+        function editUserName(){ const n=prompt('Nombre:'); if(n){state.user.name=n;saveData();render();} }
+
+        init();
+    </script>
+</body>
+</html>
